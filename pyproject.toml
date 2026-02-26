@@ -8,10 +8,14 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "jupyter>=1.1.1",
     "matplotlib>=3.10.8",
     "numpy>=2.4.2",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.17.1",
     "torch>=2.10.0",
     "torchvision>=0.25.0",
+    "tqdm>=4.67.3",
 ]
 
 [project.scripts]
