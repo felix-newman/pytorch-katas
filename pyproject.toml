@@ -21,6 +21,9 @@ dependencies = [
 [project.scripts]
 pytorch-katas = "pytorch_katas:main"
 
+[tool.ruff]
+line-length = 120
+
 [build-system]
 requires = ["uv_build>=0.9.5,<0.10.0"]
 build-backend = "uv_build"
