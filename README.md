@@ -1,17 +1,17 @@
 # PyTorch Katas
 
 Small exercises to sharpen my PyTorch Skills in the age of agents. No aim for completeness, purely based off of what I find interesting.
-I will use agents for downloading datasets, visualizations and other stuff that does not
+I will use agents for downloading datasets, visualizations and other stuff that does not matter too much
 
 # Topics
 
 ## Basics
 
-[] ResNet
+[x] ResNet
 [] AdamW
 [] AMP training
 [] Transformer from Scratch
-[] VAE for Cifar10
+[] VAE for Cifar10 - not sure whether it is interesting for such small resolutions
 [] VAE for videos
 [] Flow matching
 [] Simple MoE with deepseek style load balancing
