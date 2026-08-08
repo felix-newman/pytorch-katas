@@ -19,6 +19,7 @@ I will use agents for downloading datasets, visualizations and other stuff that 
 ## Self-supervised Learning
 
 [] MAE
+[x] SIGReg loss (LeJEPA anti-collapse regularizer)
 [] LeJepa from Scratch
 
 ## LLMs
