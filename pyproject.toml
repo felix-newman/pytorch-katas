@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 pytorch-katas = "pytorch_katas:main"
+nanogpt-speedrun = "pytorch_katas.nanogpt.train:main"
 
 [tool.ruff]
 line-length = 120

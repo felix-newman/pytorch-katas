@@ -23,7 +23,7 @@ I will use agents for downloading datasets, visualizations and other stuff that 
 
 ## LLMs
 
-[] GPT-2
+[x] GPT-2 / [modded nanoGPT speedrun with sparse basis embeddings](notebooks/nanogpt/speedrun.ipynb)
 [] n-dim RoPE
 
 ## Computer Vision
