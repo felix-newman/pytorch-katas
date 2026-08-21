@@ -22,6 +22,12 @@ dependencies = [
 [project.scripts]
 pytorch-katas = "pytorch_katas:main"
 
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.ruff]
 line-length = 120
 
