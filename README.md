@@ -43,3 +43,7 @@ I will use agents for downloading datasets, visualizations and other stuff that 
 
 [] PPO from Scratch
 [] PPO for the lux challenges
+
+## Quant
+
+[x] [Why a two-week window shift wrecks Markowitz weights](notebooks/portfolio/markowitz_sensitivity.ipynb)
