@@ -388,11 +388,12 @@ def save_sensitivity_figures(
     raw = rolling_weights(universe.returns, window=window, step=shift, method="tangency")
     shrunk = rolling_weights(universe.returns, window=window, step=shift, method="shrink")
     fig, axes = plt.subplots(2, 1, figsize=(11.5, 6.6), sharex=True)
-    vmax = max(np.percentile(np.abs(raw), 98), 1.0)
     for ax, data, title in (
         (axes[0], raw, "Rolling unconstrained tangency — weights jump every two weeks"),
         (axes[1], shrunk, "Rolling shrink / Ledoit–Wolf — same data, stable book"),
     ):
+        # Separate scales: a shared scale paints the shrunk book white against ±50 tangency bets.
+        vmax = max(float(np.percentile(np.abs(data), 98)), 0.5)
         im = ax.imshow(data.T, aspect="auto", cmap="RdBu_r", vmin=-vmax, vmax=vmax, interpolation="nearest")
         ax.set_yticks(np.arange(len(names)), names)
         ax.set_ylabel("asset")
