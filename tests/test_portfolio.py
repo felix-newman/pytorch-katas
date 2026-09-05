@@ -12,13 +12,18 @@ from pytorch_katas.portfolio import (
     allocate_window_pair,
     cov_condition_number,
     equal_weights,
+    factor_precision,
+    factor_tangency_weights,
+    frobenius_rel,
     global_min_variance_weights,
     l1_turnover,
     mean_shift_std,
+    reconstruct_factor_moments,
     rolling_weights,
     sample_moments,
     shrink_tangency_weights,
     simulate_equity_universe,
+    structured_covariance,
     tangency_weights,
 )
 
@@ -31,6 +36,7 @@ class TestAllocations(unittest.TestCase):
             tangency_weights(mu, cov),
             global_min_variance_weights(cov),
             shrink_tangency_weights(universe.returns),
+            factor_tangency_weights(universe.returns),
             equal_weights(universe.n_assets),
         ):
             self.assertAlmostEqual(float(w.sum()), 1.0, places=10)
@@ -105,6 +111,85 @@ class TestWindowSensitivity(unittest.TestCase):
         shrink_path = rolling_weights(self.universe.returns, method="shrink", step=TWO_WEEKS)
         shrink_turnovers = [l1_turnover(shrink_path[i], shrink_path[i + 1]) for i in range(len(shrink_path) - 1)]
         self.assertLess(float(np.median(shrink_turnovers)), 0.5 * float(np.median(turnovers)))
+
+    def test_factor_book_barely_moves(self) -> None:
+        raw = l1_turnover(*self.pair.weights["tangency"])
+        structured = l1_turnover(*self.pair.weights["factor"])
+        self.assertLess(structured, 0.15)
+        self.assertLess(structured, 0.1 * raw)
+        w_a, w_b = self.pair.weights["factor"]
+        # CAPM book is a mild long-only tilt along beta, not a leveraged long/short.
+        self.assertTrue(np.all(w_a > 0))
+        self.assertTrue(np.all(w_b > 0))
+        self.assertLess(float(np.max(w_a)), 0.25)
+
+
+class TestFactorReconstruction(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.universe = simulate_equity_universe(n_days=750, n_assets=12, seed=0)
+        cls.window = cls.universe.returns[200:452]
+        cls.fit = reconstruct_factor_moments(cls.window)
+        cls.sample_mu, cls.sample_cov = sample_moments(cls.window)
+        cls.true_mu, cls.true_cov = cls.universe.true_moments()
+        cls.capm_mu, _ = cls.universe.capm_moments()
+
+    def test_dgp_covariance_is_rank_one_plus_isotropic_noise(self) -> None:
+        cov = structured_covariance(self.universe.betas, self.universe.factor_vol, self.universe.idio_vol)
+        np.testing.assert_allclose(cov, self.universe.structured_covariance())
+        spike = cov - np.diag(np.square(self.universe.idio_vol))
+        singular = np.linalg.svd(spike, compute_uv=False)
+        self.assertLess(singular[1] / singular[0], 1e-10)
+
+    def test_woodbury_matches_dense_inverse(self) -> None:
+        prec = factor_precision(self.fit.beta, self.fit.factor_var, self.fit.idio_var)
+        np.testing.assert_allclose(prec, np.linalg.inv(self.fit.cov), rtol=1e-10, atol=1e-12)
+
+    def test_reconstructed_covariance_is_rank_one_plus_isotropic_noise(self) -> None:
+        spike = self.fit.cov - np.diag(self.fit.idio_var)
+        singular = np.linalg.svd(spike, compute_uv=False)
+        self.assertLess(singular[1] / singular[0], 1e-10)
+
+    def test_reconstruction_beats_sample_on_true_covariance(self) -> None:
+        sample_err = frobenius_rel(self.sample_cov, self.true_cov)
+        factor_err = frobenius_rel(self.fit.cov, self.true_cov)
+        self.assertLess(factor_err, sample_err)
+        self.assertLess(factor_err, 0.15)
+
+    def test_reconstruction_beats_sample_on_the_precision(self) -> None:
+        true_prec = np.linalg.inv(self.true_cov)
+        sample_err = frobenius_rel(np.linalg.inv(self.sample_cov), true_prec)
+        factor_err = frobenius_rel(self.fit.precision(), true_prec)
+        self.assertLess(factor_err, 0.6 * sample_err)
+
+    def test_factor_weights_track_the_oracle_capm_book(self) -> None:
+        oracle = tangency_weights(*self.universe.capm_moments())
+        sample_w = tangency_weights(self.sample_mu, self.sample_cov)
+        factor_w = factor_tangency_weights(self.window)
+        self.assertLess(float(np.linalg.norm(factor_w - oracle)), float(np.linalg.norm(sample_w - oracle)))
+
+    def test_capm_means_track_true_beta_not_sample_noise(self) -> None:
+        sample_err = float(np.linalg.norm(self.sample_mu - self.capm_mu))
+        factor_err = float(np.linalg.norm(self.fit.mu - self.capm_mu))
+        self.assertLess(factor_err, 0.5 * sample_err)
+        # Reconstructed premia are a monotone tilt along estimated beta.
+        self.assertGreater(float(np.corrcoef(self.fit.mu, self.fit.beta)[0, 1]), 0.999)
+
+    def test_two_week_shift_barely_moves_reconstructed_means(self) -> None:
+        pair = allocate_window_pair(self.universe.returns, start=200)
+        d_sample = np.max(np.abs(pair.mu_b - pair.mu_a)) * TRADING_DAYS
+        d_factor = np.max(np.abs(pair.factor_b.mu - pair.factor_a.mu)) * TRADING_DAYS
+        self.assertGreater(d_sample, 0.05)
+        self.assertLess(d_factor, 0.4 * d_sample)
+        self.assertLess(d_factor, 0.03)
+
+    def test_rolling_factor_is_stable(self) -> None:
+        raw = rolling_weights(self.universe.returns, method="tangency", step=TWO_WEEKS)
+        structured = rolling_weights(self.universe.returns, method="factor", step=TWO_WEEKS)
+        raw_to = [l1_turnover(raw[i], raw[i + 1]) for i in range(len(raw) - 1)]
+        fac_to = [l1_turnover(structured[i], structured[i + 1]) for i in range(len(structured) - 1)]
+        self.assertLess(float(np.median(fac_to)), 0.15)
+        self.assertLess(float(np.median(fac_to)), 0.15 * float(np.median(raw_to)))
 
 
 if __name__ == "__main__":

@@ -4,14 +4,21 @@ Markowitz / tangency weights are
 
     w*  ∝  Σ^{-1} μ
 
-Both μ and Σ are estimated from a finite window of returns. The mapping
-(μ, Σ) → w* is badly conditioned: sample means move by economically large
-amounts when the window slides a few days, and Σ^{-1} amplifies whatever
-noise sits in the low-eigenvalue (near-arbitrage) directions.
+The sample matrices (μ̂, Σ̂) are too noisy to invert. A first-principles
+reconstruction assumes a one-factor world
 
-This module builds a one-factor equity universe, estimates rolling
-Markowitz portfolios, and compares them to shrinkage / equal-weight rules
-that do not treat every wiggle in μ̂ as signal.
+    r_t  =  μ + β f_t + ε_t
+    Σ    =  σ_f² ββᵀ + D
+    μ    =  λ β
+
+and rebuilds both matrices from (β, σ_f, D, λ) instead of filling every
+entry of Σ̂ from the window. That is Sharpe's single-index model: N betas,
+N residual variances, one factor variance, one price of risk — not
+N(N+1)/2 covariances and N sample means.
+
+This module builds a one-factor equity universe, contrasts the sample
+matrices with the reconstructed ones, and shows that only the sample
+book jumps when the window slides two weeks.
 """
 
 from __future__ import annotations
@@ -52,6 +59,19 @@ class EquityUniverse:
     @property
     def n_assets(self) -> int:
         return int(self.returns.shape[1])
+
+    def structured_covariance(self) -> Array:
+        """Exact DGP covariance: Σ = σ_f² ββᵀ + diag(σ_ε²)."""
+        return structured_covariance(self.betas, self.factor_vol, self.idio_vol)
+
+    def true_moments(self) -> tuple[Array, Array]:
+        """True mean (including residual alpha) and structured covariance."""
+        return self.annual_premia / TRADING_DAYS, self.structured_covariance()
+
+    def capm_moments(self, annual_market_premium: float = 0.08) -> tuple[Array, Array]:
+        """Equilibrium moments: μ = λβ, same structured covariance. Residual alpha is dropped."""
+        mu = self.betas * (annual_market_premium / TRADING_DAYS)
+        return mu, self.structured_covariance()
 
 
 def simulate_equity_universe(
@@ -98,6 +118,93 @@ def sample_moments(returns: Array) -> tuple[Array, Array]:
     if cov.ndim == 0:
         cov = np.array([[float(cov)]])
     return mu, cov
+
+
+def structured_covariance(betas: Array, factor_vol: float, idio_vol: Array | float) -> Array:
+    """Σ = σ_f² ββᵀ + D, D = diag(σ_ε²)."""
+    betas = np.asarray(betas, dtype=np.float64)
+    idio = np.broadcast_to(np.asarray(idio_vol, dtype=np.float64), betas.shape)
+    return (factor_vol**2) * np.outer(betas, betas) + np.diag(np.square(idio))
+
+
+def frobenius_rel(estimate: Array, truth: Array) -> float:
+    """‖E − T‖_F / ‖T‖_F."""
+    denom = float(np.linalg.norm(truth, ord="fro"))
+    if denom < 1e-18:
+        raise ValueError("truth matrix is numerically zero")
+    return float(np.linalg.norm(estimate - truth, ord="fro") / denom)
+
+
+@dataclass(frozen=True)
+class FactorMoments:
+    """One-factor reconstruction of the Markowitz ingredients.
+
+    Σ = σ_f² ββᵀ + D,   μ = λ β
+    """
+
+    mu: Array
+    cov: Array
+    beta: Array
+    factor_var: float
+    idio_var: Array
+    price_of_risk: float
+
+    def precision(self) -> Array:
+        """Woodbury inverse: Σ^{-1} = D^{-1} − D^{-1}ββᵀD^{-1} / (1/σ_f² + βᵀD^{-1}β)."""
+        return factor_precision(self.beta, self.factor_var, self.idio_var)
+
+
+def factor_precision(beta: Array, factor_var: float, idio_var: Array) -> Array:
+    """Closed-form Σ^{-1} for a rank-one-plus-diagonal covariance."""
+    if factor_var <= 0:
+        raise ValueError("factor_var must be positive")
+    d_inv = 1.0 / np.asarray(idio_var, dtype=np.float64)
+    v = d_inv * beta
+    denom = 1.0 / factor_var + float(beta @ v)
+    return np.diag(d_inv) - np.outer(v, v) / denom
+
+
+def reconstruct_factor_moments(returns: Array) -> FactorMoments:
+    """Rebuild μ and Σ from the spiked one-factor model.
+
+    The first-principles matrices are
+
+        Σ  =  (λ₁ − σ̄²) q₁q₁ᵀ  +  σ̄² I
+        μ  =  λ β,   β = √(λ₁ − σ̄²) q₁,   λ = (βᵀ μ̂) / (βᵀ β)
+
+    λ₁, q₁ are the market eigenpair of the sample covariance; σ̄² is the
+    average of the leftover eigenvalues (the idiosyncratic bulk). Residual
+    alphas and residual covariances are treated as estimation error, not
+    as an investment opportunity.
+
+    Identification: the latent factor is scaled to unit variance, so
+    Σ = ββᵀ + σ̄² I and Woodbury applies with factor_var = 1.
+    """
+    mu_hat, cov_hat = sample_moments(returns)
+    n = cov_hat.shape[0]
+    evals, evecs = np.linalg.eigh(cov_hat)
+    lam1 = float(evals[-1])
+    q1 = evecs[:, -1]
+    if lam1 <= 0:
+        raise ValueError("leading covariance eigenvalue is not positive")
+    if float(q1.sum()) < 0:
+        q1 = -q1
+    bulk = float(np.mean(evals[:-1])) if n > 1 else 0.0
+    spike = max(lam1 - bulk, 0.0)
+    beta = q1 * np.sqrt(spike) if spike > 0 else q1
+    idio_var = np.full(n, max(bulk, 1e-12), dtype=np.float64)
+    cov = np.outer(beta, beta) + np.diag(idio_var)
+    denom = float(beta @ beta)
+    price = float(beta @ mu_hat) / denom if denom > 0 else 0.0
+    mu = price * beta
+    return FactorMoments(mu, cov, beta, 1.0, idio_var, price)
+
+
+def factor_tangency_weights(returns: Array) -> Array:
+    """Tangency portfolio on the reconstructed (μ, Σ), inverted with Woodbury."""
+    fit = reconstruct_factor_moments(returns)
+    raw = fit.precision() @ fit.mu
+    return _normalize_budget(raw)
 
 
 def _normalize_budget(raw: Array) -> Array:
@@ -243,6 +350,8 @@ class WindowPair:
     cov_a: Array
     cov_b: Array
     weights: dict[str, tuple[Array, Array]]
+    factor_a: FactorMoments
+    factor_b: FactorMoments
 
     @property
     def shift(self) -> int:
@@ -265,15 +374,18 @@ def allocate_window_pair(
     b = returns[start + shift : start + shift + window]
     mu_a, cov_a = sample_moments(a)
     mu_b, cov_b = sample_moments(b)
+    factor_a = reconstruct_factor_moments(a)
+    factor_b = reconstruct_factor_moments(b)
     weights = {
         "tangency": (tangency_weights(mu_a, cov_a), tangency_weights(mu_b, cov_b)),
         "gmv": (global_min_variance_weights(cov_a), global_min_variance_weights(cov_b)),
         "ridge": (ridge_tangency_weights(mu_a, cov_a, ridge), ridge_tangency_weights(mu_b, cov_b, ridge)),
         "shrink": (shrink_tangency_weights(a, mu_shrink), shrink_tangency_weights(b, mu_shrink)),
+        "factor": (factor_tangency_weights(a), factor_tangency_weights(b)),
         "long_only": (long_only_mv_weights(mu_a, cov_a), long_only_mv_weights(mu_b, cov_b)),
         "equal": (equal_weights(a.shape[1]), equal_weights(b.shape[1])),
     }
-    return WindowPair(start, start + shift, window, mu_a, mu_b, cov_a, cov_b, weights)
+    return WindowPair(start, start + shift, window, mu_a, mu_b, cov_a, cov_b, weights, factor_a, factor_b)
 
 
 def rolling_weights(
@@ -299,6 +411,8 @@ def rolling_weights(
             w = ridge_tangency_weights(mu, cov, ridge)
         elif method == "shrink":
             w = shrink_tangency_weights(chunk, mu_shrink)
+        elif method == "factor":
+            w = factor_tangency_weights(chunk)
         elif method == "long_only":
             w = long_only_mv_weights(mu, cov)
         elif method == "equal":
@@ -314,15 +428,31 @@ def rolling_weights(
 # ---------------------------------------------------------------------------
 
 
-def summarize_pair(pair: WindowPair, names: tuple[str, ...] | None = None) -> str:
+def summarize_pair(
+    pair: WindowPair,
+    names: tuple[str, ...] | None = None,
+    universe: EquityUniverse | None = None,
+) -> str:
     """Human-readable report of how much a two-week slide moved the book."""
     names = names or tuple(f"A{i + 1:02d}" for i in range(pair.mu_a.shape[0]))
     d_mu_ann = (pair.mu_b - pair.mu_a) * TRADING_DAYS
+    d_mu_fac = (pair.factor_b.mu - pair.factor_a.mu) * TRADING_DAYS
     lines = [
         f"Window {pair.window} days, shifted by {pair.shift} trading days (~{pair.shift / 5:.0f} weeks).",
-        f"Condition number of Σ̂ (window A): {cov_condition_number(pair.cov_a):.1f}",
-        f"Largest |Δμ| (annualized): {np.max(np.abs(d_mu_ann)):.2%}",
-        f"Cross-sectional std of Δμ (annualized): {np.std(d_mu_ann):.2%}",
+        f"Condition number of sample Σ̂:        {cov_condition_number(pair.cov_a):.1f}",
+        f"Condition number of reconstructed Σ: {cov_condition_number(pair.factor_a.cov):.1f}",
+        f"Largest |Δμ| sample / factor (ann.): "
+        f"{np.max(np.abs(d_mu_ann)):.2%} / {np.max(np.abs(d_mu_fac)):.2%}",
+        f"Cross-sectional std of Δμ sample / factor (ann.): "
+        f"{np.std(d_mu_ann):.2%} / {np.std(d_mu_fac):.2%}",
+    ]
+    if universe is not None:
+        truth_cov = universe.structured_covariance()
+        lines += [
+            f"Relative Frobenius error vs true Σ, sample:        {frobenius_rel(pair.cov_a, truth_cov):.2%}",
+            f"Relative Frobenius error vs true Σ, reconstructed: {frobenius_rel(pair.factor_a.cov, truth_cov):.2%}",
+        ]
+    lines += [
         "",
         f"{'rule':<12} {'turnover':>10} {'max |w| A':>10} {'max |w| B':>10} {'max |Δw|':>10}",
     ]
@@ -331,11 +461,13 @@ def summarize_pair(pair: WindowPair, names: tuple[str, ...] | None = None) -> st
             f"{name:<12} {l1_turnover(w_a, w_b):>9.1%} {np.max(np.abs(w_a)):>10.1%} "
             f"{np.max(np.abs(w_b)):>10.1%} {np.max(np.abs(w_b - w_a)):>10.1%}"
         )
-    lines += ["", "Annualized sample means, window A vs B:"]
+    lines += ["", "Annualized means, sample vs reconstructed (window A → B):"]
     for i, name in enumerate(names):
         lines.append(
-            f"  {name}: {pair.mu_a[i] * TRADING_DAYS:>7.2%}  →  {pair.mu_b[i] * TRADING_DAYS:>7.2%}  "
-            f"(Δ {d_mu_ann[i]:>+7.2%})"
+            f"  {name}: sample {pair.mu_a[i] * TRADING_DAYS:>7.2%} → {pair.mu_b[i] * TRADING_DAYS:>7.2%} "
+            f"(Δ {d_mu_ann[i]:>+7.2%})   "
+            f"factor {pair.factor_a.mu[i] * TRADING_DAYS:>7.2%} → {pair.factor_b.mu[i] * TRADING_DAYS:>7.2%} "
+            f"(Δ {d_mu_fac[i]:>+7.2%})"
         )
     return "\n".join(lines)
 
@@ -347,7 +479,7 @@ def save_sensitivity_figures(
     shift: int = TWO_WEEKS,
     start: int = 200,
 ) -> dict[str, Path]:
-    """Write the three plots that make the instability visible."""
+    """Write the plots that contrast sample matrices with the factor reconstruction."""
     import matplotlib.pyplot as plt
 
     out = Path(out_dir)
@@ -356,12 +488,61 @@ def save_sensitivity_figures(
     names = list(universe.names)
     x = np.arange(len(names))
     paths: dict[str, Path] = {}
+    truth_cov = universe.structured_covariance()
+    truth_mu, _ = universe.capm_moments()
 
-    # 1. Side-by-side tangency vs shrinkage weights
+    # 1. Covariance: sample vs reconstructed vs truth
+    matrices = (
+        (pair.cov_a, "Sample Σ̂"),
+        (pair.factor_a.cov, "Reconstructed Σ = σ_f² ββᵀ + D"),
+        (truth_cov, "True Σ from the DGP"),
+    )
+    vmax = max(float(np.max(np.abs(m))) for m, _ in matrices)
+    fig, axes = plt.subplots(1, 3, figsize=(12.4, 4.2), constrained_layout=True)
+    for ax, (mat, title) in zip(axes, matrices, strict=True):
+        im = ax.imshow(mat, cmap="RdBu_r", vmin=-vmax, vmax=vmax, interpolation="nearest")
+        ax.set_xticks(x, names, rotation=45, ha="right", fontsize=7)
+        ax.set_yticks(x, names, fontsize=7)
+        err = frobenius_rel(mat, truth_cov)
+        ax.set_title(f"{title}\n‖· − Σ‖_F / ‖Σ‖_F = {err:.1%}", fontsize=10)
+    fig.colorbar(im, ax=list(axes), fraction=0.02, pad=0.02)
+    fig.suptitle("Off-diagonals of Σ̂ are residual noise. The factor rebuild keeps only ββᵀ + D.", fontsize=11)
+    paths["covariance"] = out / "covariance_reconstruction.png"
+    fig.savefig(paths["covariance"], dpi=140)
+    plt.close(fig)
+
+    # 2. Spectra + means
+    sample_eigs = np.sort(np.linalg.eigvalsh(pair.cov_a))[::-1]
+    factor_eigs = np.sort(np.linalg.eigvalsh(pair.factor_a.cov))[::-1]
+    truth_eigs = np.sort(np.linalg.eigvalsh(truth_cov))[::-1]
+    ranks = np.arange(1, len(sample_eigs) + 1)
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.4))
+    axes[0].semilogy(ranks, sample_eigs, "o-", color="#c45911", label="sample")
+    axes[0].semilogy(ranks, factor_eigs, "s-", color="#1f4e79", label="reconstructed")
+    axes[0].semilogy(ranks, truth_eigs, "k--", label="true DGP")
+    axes[0].set_xlabel("eigenvalue rank")
+    axes[0].set_ylabel("λ")
+    axes[0].set_title("Keep the market spike, flatten the noisy bulk")
+    axes[0].legend(frameon=False, fontsize=8)
+    width = 0.28
+    axes[1].bar(x - width, pair.mu_a * TRADING_DAYS, width, label="sample μ̂", color="#c45911")
+    axes[1].bar(x, pair.factor_a.mu * TRADING_DAYS, width, label="μ = λβ", color="#1f4e79")
+    axes[1].bar(x + width, truth_mu * TRADING_DAYS, width, label="true CAPM μ", color="#7f7f7f")
+    axes[1].axhline(0.0, color="black", linewidth=0.6)
+    axes[1].set_xticks(x, names, rotation=45, ha="right")
+    axes[1].set_ylabel("annualized mean")
+    axes[1].set_title("One price of risk. Residual alphas are discarded.")
+    axes[1].legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    paths["moments"] = out / "factor_moment_reconstruction.png"
+    fig.savefig(paths["moments"], dpi=140)
+    plt.close(fig)
+
+    # 3. Weights: sample tangency vs factor tangency
     fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.4), sharey=False)
     for ax, rule, title in (
-        (axes[0], "tangency", "Unconstrained tangency"),
-        (axes[1], "shrink", "Ledoit–Wolf + shrunk means"),
+        (axes[0], "tangency", "Invert the sample matrices"),
+        (axes[1], "factor", "Invert the reconstructed matrices"),
     ):
         w_a, w_b = pair.weights[rule]
         width = 0.38
@@ -372,11 +553,16 @@ def save_sensitivity_figures(
         ax.set_ylabel("weight")
         ax.set_title(title)
         ax.legend(frameon=False, fontsize=8)
-        ax.set_ylim(min(-1.5, w_a.min(), w_b.min()) - 0.1, max(1.5, w_a.max(), w_b.max()) + 0.1)
+        lo = min(-0.05, float(w_a.min()), float(w_b.min())) - 0.05
+        hi = max(0.4, float(w_a.max()), float(w_b.max())) + 0.05
+        if rule == "tangency":
+            lo = min(-1.5, float(w_a.min()), float(w_b.min())) - 0.1
+            hi = max(1.5, float(w_a.max()), float(w_b.max())) + 0.1
+        ax.set_ylim(lo, hi)
     fig.suptitle(
         f"Same book, window slid by {shift} trading days  ·  "
         f"turnover {l1_turnover(*pair.weights['tangency']):.0%} vs "
-        f"{l1_turnover(*pair.weights['shrink']):.0%}",
+        f"{l1_turnover(*pair.weights['factor']):.0%}",
         fontsize=12,
     )
     fig.tight_layout()
@@ -384,17 +570,16 @@ def save_sensitivity_figures(
     fig.savefig(paths["weights"], dpi=140)
     plt.close(fig)
 
-    # 2. Rolling heatmaps
+    # 4. Rolling heatmaps: sample vs factor
     raw = rolling_weights(universe.returns, window=window, step=shift, method="tangency")
-    shrunk = rolling_weights(universe.returns, window=window, step=shift, method="shrink")
+    structured = rolling_weights(universe.returns, window=window, step=shift, method="factor")
     fig, axes = plt.subplots(2, 1, figsize=(11.5, 6.6), sharex=True)
     for ax, data, title in (
-        (axes[0], raw, "Rolling unconstrained tangency — weights jump every two weeks"),
-        (axes[1], shrunk, "Rolling shrink / Ledoit–Wolf — same data, stable book"),
+        (axes[0], raw, "Rolling sample tangency — inverts noise every two weeks"),
+        (axes[1], structured, "Rolling factor reconstruction — same data, structural book"),
     ):
-        # Separate scales: a shared scale paints the shrunk book white against ±50 tangency bets.
-        vmax = max(float(np.percentile(np.abs(data), 98)), 0.5)
-        im = ax.imshow(data.T, aspect="auto", cmap="RdBu_r", vmin=-vmax, vmax=vmax, interpolation="nearest")
+        vmax_w = max(float(np.percentile(np.abs(data), 98)), 0.25)
+        im = ax.imshow(data.T, aspect="auto", cmap="RdBu_r", vmin=-vmax_w, vmax=vmax_w, interpolation="nearest")
         ax.set_yticks(np.arange(len(names)), names)
         ax.set_ylabel("asset")
         ax.set_title(title)
@@ -403,24 +588,6 @@ def save_sensitivity_figures(
     fig.tight_layout()
     paths["rolling"] = out / "rolling_allocation_heatmap.png"
     fig.savefig(paths["rolling"], dpi=140)
-    plt.close(fig)
-
-    # 3. Mechanism: noisy Δμ vs. Σ^{-1} amplification
-    eigvals = np.sort(np.linalg.eigvalsh(pair.cov_a))[::-1]
-    d_mu_ann = (pair.mu_b - pair.mu_a) * TRADING_DAYS
-    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.4))
-    axes[0].bar(x, d_mu_ann, color="#7b2d8e")
-    axes[0].axhline(0.0, color="black", linewidth=0.6)
-    axes[0].set_xticks(x, names, rotation=45, ha="right")
-    axes[0].set_ylabel("Δμ̂ (annualized)")
-    axes[0].set_title("A two-week slide already moves estimated premia by several %")
-    axes[1].semilogy(np.arange(1, len(eigvals) + 1), eigvals, marker="o", color="#1f4e79")
-    axes[1].set_xlabel("eigenvalue rank")
-    axes[1].set_ylabel("λ(Σ̂)")
-    axes[1].set_title(f"Σ̂ is ill-conditioned  (κ = {cov_condition_number(pair.cov_a):.0f})")
-    fig.tight_layout()
-    paths["mechanism"] = out / "mean_shift_and_eigenvalues.png"
-    fig.savefig(paths["mechanism"], dpi=140)
     plt.close(fig)
 
     return paths
