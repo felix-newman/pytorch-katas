@@ -21,6 +21,7 @@ from pytorch_katas.portfolio import (
     reconstruct_factor_moments,
     rolling_weights,
     sample_moments,
+    save_equation_plates,
     shrink_tangency_weights,
     simulate_equity_universe,
     structured_covariance,
@@ -182,6 +183,16 @@ class TestFactorReconstruction(unittest.TestCase):
         self.assertGreater(d_sample, 0.05)
         self.assertLess(d_factor, 0.4 * d_sample)
         self.assertLess(d_factor, 0.03)
+
+    def test_equation_plates_are_pngs(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = save_equation_plates(tmp)
+            self.assertEqual(set(paths), {"eq_model", "eq_woodbury", "eq_mean_shift"})
+            for path in paths.values():
+                self.assertGreater(path.stat().st_size, 1000)
+                self.assertTrue(path.read_bytes().startswith(b"\x89PNG"))
 
     def test_rolling_factor_is_stable(self) -> None:
         raw = rolling_weights(self.universe.returns, method="tangency", step=TWO_WEEKS)

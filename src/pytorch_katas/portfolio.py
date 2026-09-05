@@ -590,4 +590,52 @@ def save_sensitivity_figures(
     fig.savefig(paths["rolling"], dpi=140)
     plt.close(fig)
 
+    paths.update(save_equation_plates(out))
+    return paths
+
+
+def save_equation_plates(out_dir: str | Path) -> dict[str, Path]:
+    """Rasterize the identities. Cursor and GitHub do not run MathJax on $...$."""
+    import matplotlib.pyplot as plt
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    plates = {
+        "eq_model": (
+            [
+                r"$r_t = \mu + \beta f_t + \varepsilon_t$",
+                r"$\Sigma = (\lambda_1 - \bar\sigma^2)\, q_1 q_1^\top + \bar\sigma^2 I$",
+                r"$\mu = \lambda\beta$",
+                r"$w^\star \propto \Sigma^{-1}\mu$",
+            ],
+            10.6,
+            3.2,
+        ),
+        "eq_woodbury": (
+            [r"$\Sigma^{-1} = \bar\sigma^{-2} I \;-\; \dfrac{\bar\sigma^{-4}\beta\beta^\top}{1 + \bar\sigma^{-2}\beta^\top\beta}$"],
+            10.6,
+            1.55,
+        ),
+        "eq_mean_shift": (
+            [r"$\mathrm{std}(\hat\mu_B - \hat\mu_A) = \dfrac{\sigma\sqrt{2h}}{T}$"],
+            10.6,
+            1.55,
+        ),
+    }
+    paths: dict[str, Path] = {}
+    for name, (lines, width, height) in plates.items():
+        fig, ax = plt.subplots(figsize=(width, height))
+        fig.patch.set_facecolor("white")
+        ax.set_facecolor("white")
+        ax.set_axis_off()
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        n = len(lines)
+        for i, line in enumerate(lines):
+            y = 1.0 - (i + 0.55) / (n + 0.1)
+            ax.text(0.5, y, line, fontsize=20 if n > 1 else 22, ha="center", va="center")
+        path = out / f"{name}.png"
+        fig.savefig(path, dpi=160, facecolor="white", bbox_inches="tight", pad_inches=0.28)
+        plt.close(fig)
+        paths[name] = path
     return paths
